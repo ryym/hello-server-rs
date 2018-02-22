@@ -32,7 +32,7 @@ impl ThreadPool {
     where
         F: FnOnce() + Send + 'static,
     {
-
+        self.sender.send(Box::new(f)).unwrap();
     }
 }
 
@@ -43,11 +43,38 @@ struct Worker {
 
 impl Worker {
     fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<Job>>>) -> Worker {
-        Worker {
-            id,
-            thread: thread::spawn(|| {}), // XXX
-        }
+        let thread = thread::spawn(move || {
+            loop {
+                let job = receiver.lock().unwrap().recv().unwrap();
+                println!("Worker {} got a job; executing.", id);
+                job.call_box();
+                println!("Worker {} done.", id);
+            }
+        });
+
+        Worker { id, thread }
     }
 }
 
-struct Job;
+// FnBox を使わずに Job を Box<FnOnce() + Send + 'static>
+// として定義すると、 Box 内のクロージャをコールする際に
+// コンパイルエラーになってしまう (`(*job)()`とは書けない)。
+// これは、各クロージャは FnOnce trait を実装するそれぞれ別の型であり、
+// Box 内のクロージャを move しようとしてもコンパイル時にそいつのサイズが
+// 静的には決まらないため (たぶん)。
+// そこで FnOnce trait を実装する全ての型に FnBox という trait を
+// 実装し、`Box`内にいる場合のみ呼び出せる`call_box`を定義する。
+// Generics により、`call_box`は実際にそれを使用するクロージャごとに実装されるため、
+// コンパイル時に静的にサイズが決まる、という感じか (たぶん)。
+// 面倒だし、将来的にはこういう tricky な処理は不要にしたい、との事。
+type Job = Box<FnBox + Send + 'static>;
+
+trait FnBox {
+    fn call_box(self: Box<Self>);
+}
+
+impl<F: FnOnce()> FnBox for F {
+    fn call_box(self: Box<F>) {
+        (*self)();
+    }
+}
